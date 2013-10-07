@@ -1,21 +1,22 @@
 #!/usr/bin/python
+# -*- coding: utf-8 -*-
 import sys
 import os
-import re
+import socket
 
 
 def read(host,port,filename):
-  print "host " + host
-  print "filename " + filename 
-  print "port " + str(port)
+  s = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+  s.connect((host, port))
+  print "READ:Connected to " + host + " on port " + str(port)
 
 def write(host,port,filename):
   if not os.path.isfile(filename):
      print "file not found"
      return
-  print "host " + host
-  print "filename " + filename 
-  print "port " + str(port)
+  s = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
+  s.connect((host, port))
+  print "WRITE: Connected to " + host + " on port " + str(port)
 
 def main():
   if len(sys.argv) != 4 and len(sys.argv) != 5:
