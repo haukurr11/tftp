@@ -5,10 +5,19 @@ import os
 import socket
 
 
+def req_header(filename,opcode,mode):
+  if opcode == "RRQ":
+    codehex = "\x00\x01"
+  elif opcode == "WRQ":
+    codehex = "\x00\x02"
+  return codehex + filename + "\x00" + mode + "\x00"
+
 def read(host,port,filename):
   s = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
   s.connect((host, port))
-  print "READ:Connected to " + host + " on port " + str(port)
+  header = req_header(filename,"WRQ","octet")
+  print header
+  s.sendto(header,(host,port))
 
 def write(host,port,filename):
   if not os.path.isfile(filename):
