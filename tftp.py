@@ -9,46 +9,28 @@ import struct
 def read(host,port,filename):
   clientsocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
   clientsocket.settimeout(5)
-  pack_format = '!H' + str(len(filename)) + 'sB5sB'
-  sendpacket = struct.pack(pack_format.encode(), 1, filename.encode(), 0, b'octet', 0)
+  pack_format = '!H%dsB5sB' % len(filename)
+  sendpacket = struct.pack(pack_format, 1, filename, 0, b'octet', 0)
   clientsocket.sendto(sendpacket, (host, port))
-  totaldatalen = 0
-  countblock = 1
   while True:
-      retries = 0
-      while retries < 3:
-          try:
-            data, remotesocket = clientsocket.recvfrom(512)
-            opcode = struct.unpack('!H', data[0:2])[0]
-            retries= 0
-            break
-          except:
-            clientsocket.sendto(sendpacket, (host, port))
-            opcode = 'Timeout'
-            retries += 1
-      if opcode == 3:
-        blockno = struct.unpack('!H',data[2:4])[0]
-        if blockno != countblock:
-            clientsocket.sendto(errBlockNo, remotesocket)
-            print('Receive wrong block. Session closed.')
-            break
-        countblock += 1
-        payload = data[4:]
-        totaldatalen += len(payload)
-        sendpacket = struct.pack(b'!2H', 4, blockno)
+      try:
+        receivedpacket, remotesocket = clientsocket.recvfrom(512)
+        opcode = struct.unpack('!H', receivedpacket[0:2])[0]
+      except:
+        clientsocket.sendto(sendpacket, (host, port))
+        continue
+      if opcode == 3: #DATA PACKET
+        block = struct.unpack('!H',receivedpacket[2:4])[0]
+        data = receivedpacket[4:]
+        sendpacket = struct.pack(b'!2H', 4, block) #ACK PACKET
         clientsocket.sendto(sendpacket, remotesocket)
-        if len(payload) < 512:
-            print('\rget %s :%s bytes. finish.' %(filename, totaldatalen))
+        if len(receivedpacket) < 512:
+            print "DONE!"
             break
-      elif opcode == 5:
-        errString = data[4:-1]
-        print('Received error code %s : %s' %(str(errCode), bytes.decode(errString)))
-        break
-      elif opcode == 'Timeout':
-        print('Timeout. Session closed.')
-        break
-      else:
-        print('Unknown error. Session closed.')
+      elif opcode == 5: #ERROR PACKET
+        errCode = struct.unpack('!H',receivedpacket[2:4])[0]
+        errString = receivedpacket[4:-1]
+        print "ERROR(" + errCode + ") : " + errString
         break
 
 
