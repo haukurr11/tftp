@@ -3,49 +3,108 @@
 import sys
 import os
 import socket
-import struct
+from struct import pack,unpack
 
+PACKET_SIZE = 516
+MAX_RETRIES = 5
+
+class TooManyRetriesException(Exception):
+  pass
+
+class ErrorPacketException(Exception):
+  pass
+
+class IllegalOperationReceived(Exception):
+  pass
+
+class UnknownRequest(Exception):
+  pass
+
+def udp_socket():
+  sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+  sock.settimeout(10)
+  return sock
+
+def req_header(rtype,filename,mode="octet"):
+  if rtype == "RRQ":
+    statuscode = 1
+  elif rtype == "WRQ":
+    statuscode = 2
+  else:
+    raise UnknownRequest("UNKNOWN REQUEST TYPE: " + rtype)
+  header_pattern = "!H%dsB5sB" % len(filename)
+  return pack(header_pattern,statuscode,filename,0,mode,0)
+
+def get_opcode(p):
+  return unpack("!H", p[0:2])[0]
+
+def datapacket_split(p):
+  return unpack("!2H", p[0:4]) + (p[4:],)
+
+def errorpacket_split(p):
+  return unpack("!2H",p[0:4]) + (p[4:-1],)
+
+def ackpacket(block):
+  return pack("!2H", 4, block)
+
+def errorpacket(errno,errmsg):
+  error_pattern = "!2H%dsB" % len(errmsg)
+  return pack(error_pattern, 5, errno, errmsg, 0)
 
 def read(host,port,filename):
-  clientsocket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-  clientsocket.settimeout(5)
-  pack_format = '!H%dsB5sB' % len(filename)
-  sendpacket = struct.pack(pack_format, 1, filename, 0, b'octet', 0)
-  clientsocket.sendto(sendpacket, (host, port))
+  sock = udp_socket()
+  opacket = req_header("RRQ",filename)
+  sock.sendto(opacket, (host,port) )
+  try:
+    received_file = open(filename,"wb+")
+  except Exception:
+    sock.sendto(errorpacket(2,"Access violation"), (host,port) )
+    raise
+  retries = 0
   while True:
+    try:
+      if retries >= MAX_RETRIES:
+        raise TooManyRetriesException(
+            "Failed after %d retries" % retries)
+      rpacket, rsock = sock.recvfrom(PACKET_SIZE)
+      retries = 0
+    except socket.timeout:
+      retries += 1
+      sock.sendto(opacket, (host,port))
+      continue
+    opcode = get_opcode(rpacket)
+    if opcode == 5: #ERROR PACKET
+      errorcode,errmsg = errorpacket_split(rpacket)[1:]
+      raise ErrorPacketException( 
+                ("ERROR(%d): " % errorcode) + errmsg)
+    elif opcode == 3: #DATA PACKET
+      block,data = datapacket_split(rpacket)[1:]
+      sock.sendto( ackpacket(block), rsock)
       try:
-        receivedpacket, remotesocket = clientsocket.recvfrom(512)
-        opcode = struct.unpack('!H', receivedpacket[0:2])[0]
-      except:
-        clientsocket.sendto(sendpacket, (host, port))
-        continue
-      if opcode == 3: #DATA PACKET
-        block = struct.unpack('!H',receivedpacket[2:4])[0]
-        data = receivedpacket[4:]
-        sendpacket = struct.pack(b'!2H', 4, block) #ACK PACKET
-        clientsocket.sendto(sendpacket, remotesocket)
-        if len(receivedpacket) < 512:
-            print "DONE!"
-            break
-      elif opcode == 5: #ERROR PACKET
-        errCode = struct.unpack('!H',receivedpacket[2:4])[0]
-        errString = receivedpacket[4:-1]
-        print "ERROR(" + errCode + ") : " + errString
-        break
-
-
-def write(host,port,filename):
-  if not os.path.isfile(filename):
-     print "file not found"
-     return
-  s = socket.socket(socket.AF_INET,socket.SOCK_DGRAM)
-  s.connect((host, port))
-  print "WRITE: Connected to " + host + " on port " + str(port)
+        received_file.write(data)
+        print "packet %d received, size: %d bytes" \
+              % (block,len(data))
+      except IOError as e:
+        sock.sendto(
+            errorpacket(3,
+                   "Disk full or allocation exceeded"),rsock)
+        received_file.close()
+        raise
+      if len(rpacket) < PACKET_SIZE:
+          received_file.close()
+          print "SUCCESS: the file " \
+                + filename + " has been received"
+          return
+    else:
+        sock.sendto(
+            errorpacket(4,"Illegal TFTP Operation",rsock))
+        received_file.close()
+        raise IllegalOperationReceived("Unexpected Opcode")
 
 def main():
   if len(sys.argv) != 4 and len(sys.argv) != 5:
-    print "The program takes 4 arguments:\
-           servername, command and port(optional)"
+    print "The program takes 4 arguments:" \
+          +" servername, command and port(optional)"
     return
   host = sys.argv[1]
   command = sys.argv[2]
@@ -63,8 +122,8 @@ def main():
   elif command == "skrifa":
     write(host,port,filename)
   else:
-    print "the program only supports \
-           the commands lesa and skrifa"
+    print "the program only supports " \
+        + "the commands lesa and skrifa"
 
 if __name__ == "__main__":
    main()
