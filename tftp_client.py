@@ -6,11 +6,20 @@ import socket
 from struct import pack,unpack
 
 BLOCK_SIZE = 512 #bytes
-MAX_RETRIES = 5 #retries
 CONNECTION_TIMEOUT = 10 #seconds
 
-class TooManyRetries(Exception):
-    pass
+OPCODE_DATA = 3
+OPCODE_ACK = 4
+OPCODE_ERROR = 5
+
+ERR_UNDEFINED = 0
+ERR_NOTFOUND_= 1
+ERR_ACCESS = 2
+ERR_DISKFULL = 3
+ERR_ILLEGAL = 4
+ERR_TID = 5
+ERR_EXISTS = 6
+ERR_NOUSER = 7
 
 class ErrorPacket(Exception):
     pass
@@ -22,6 +31,9 @@ class UnknownRequest(Exception):
     pass
 
 class WrongBlock(Exception):
+    pass
+
+class FileDoesNotExist(Exception):
     pass
 
 def udp_socket():
@@ -56,7 +68,7 @@ def req_header(rtype,filename,mode="octet"):
     return pack(header_pattern,statuscode,filename,0,mode,0)
 
 
-def get_opcode(p):
+def opcode(p):
     """
     Returns a TFTP request header to be sent
     to a server. can be either write(WRQ) or read(RRQ).
@@ -73,6 +85,7 @@ def datapacket(blocknum,data):
     @param blocknum: number of block being sent
     @return: data packet using the TFTP standard
     """
+    #pattern : shortint(opnum),shortint(blockno),bytes(data)
     return pack("!2H", 3, blocknum) + data
 
 def datapacket_split(p):
@@ -104,7 +117,7 @@ def errorpacket_split(p):
     @param p: an error packet using the TFTP standard
     @return: a tuple with each part of an error packet in order of the standard
     """
-    return unpack("!2H",p[0:4]) + (p[4:-1],)
+    return unpack("!2H",p[0:4]) + (p[4:-1],0)
 
 def ackpacket(blocknum):
     """
@@ -137,41 +150,40 @@ def write(host,port,filename):
     @type  filename: string
     @param filename: name of a file to write(has to exist on disk)
     """
+    if not os.path.isfile(filename):
+      raise FileDoesNotExist("No such file: " + filename)
     sock = udp_socket()
     header = req_header("WRQ",filename) #WRQ header
     sock.sendto(header, (host,port) )
     try:
         sending_file = open(filename,"rb+")
     except IOError:
-        sock.sendto(errorpacket(2,"Access violation"), (host,port) )
+        sock.sendto(errorpacket(ERR_ACCESS,"Access violation"), (host,port) )
         raise
-    retries = 0 #connection retries
     blocknum = 1 #number of block being written
     req_port = -1 #port to receive from host
-    while retries < MAX_RETRIES:
+    while True:
         try:
             rpacket, rsock_addr = sock.recvfrom(BLOCK_SIZE+4)
-            retries = 0
             packet_port = rsock_addr[1]
             if blocknum == 1:
                req_port = packet_port
         except socket.timeout:
-            retries += 1
+            print("Server timed out, reconnecting...")
             continue
         if packet_port == req_port: #ignore packets from other ports
-            opcode = get_opcode(rpacket)
-            if opcode == 5: #ERROR PACKET
-                errorcode,errmsg = errorpacket_split(rpacket)[1:]
+            if opcode(rpacket) == OPCODE_ERROR: #ERROR PACKET
+                errorcode,errmsg = errorpacket_split(rpacket)[1:-1]
                 raise ErrorPacket(
                     ("ERROR(%d): " % errorcode) + errmsg)
-            elif opcode == 4: #ACK PACKET
+            if opcode(rpacket) == OPCODE_ACK: #ACK PACKET
                 rblocknum = ackpacket_split(rpacket)[1]
                 if rblocknum+1 == blocknum:
                     try:
                         data = sending_file.read(BLOCK_SIZE)
                     except IOError:
                         sock.sendto(
-                            errorpacket(2,"Access violation"),rsock_addr)
+                            errorpacket(ERR_ACCESS,"Access violation"),rsock_addr)
                         raise
                     dpacket = datapacket(blocknum,data)
                     sock.sendto(dpacket,rsock_addr)
@@ -188,17 +200,15 @@ def write(host,port,filename):
                     msg = "Wrong block requested: expected %d but got %d" \
                           % (blocknum,rblocknum+1)
                     sock.sendto(
-                        errorpacket(4,msg,rsock_addr))
+                        errorpacket(ERR_ILLEGAL,msg,rsock_addr))
                     received_file.close()
                     raise WrongBlock(msg)
             else: #unkown operation received
                 sock.sendto(
-                    errorpacket(4,"Illegal TFTP Operation",rsock_addr))
+                    errorpacket(ERR_ILLEGAL,"Illegal TFTP Operation",rsock_addr))
                 received_file.close()
                 raise IllegalOperationReceived("Unexpected Opcode")
     received_file.close()
-    raise TooManyRetries(
-        "Failed after %d retries" % MAX_RETRIES)
 
 def read(host,port,filename):
     """
@@ -216,28 +226,25 @@ def read(host,port,filename):
     try:
         received_file = open(filename,"wb+")
     except IOError:
-        sock.sendto(errorpacket(2,"Access violation"), (host,port) )
+        sock.sendto(errorpacket(ERR_ACCESS,"Access violation"), (host,port) )
         raise
-    retries = 0 #connection retries
     blocknum = 1 #number of block being requested
     req_port = -1 #port to receive from host
-    while retries < MAX_RETRIES:
+    while True:
         try:
             rpacket, rsock_addr = sock.recvfrom(BLOCK_SIZE+4)
-            retries = 0
             packet_port = rsock_addr[1]
             if blocknum == 1:
                req_port = packet_port
         except socket.timeout:
-            retries += 1
+            print("Server timed out, reconnecting...")
             continue
         if packet_port == req_port: #ignore packets from other ports
-            opcode = get_opcode(rpacket)
-            if opcode == 5: #ERROR PACKET
-                errorcode,errmsg = errorpacket_split(rpacket)[1:]
-                raise ErrorPacket( 
+            if opcode(rpacket) == OPCODE_ERROR: #ERROR PACKET
+                errorcode,errmsg = errorpacket_split(rpacket)[1:-1]
+                raise ErrorPacket(
                     ("ERROR(%d): " % errorcode) + errmsg)
-            elif opcode == 3: #DATA PACKET
+            if opcode(rpacket) == OPCODE_DATA: #DATA PACKET
                 rblocknum,data = datapacket_split(rpacket)[1:]
                 if blocknum == rblocknum: #correct block received
                     sock.sendto( ackpacket(blocknum), rsock_addr)
@@ -247,7 +254,7 @@ def read(host,port,filename):
                             % (rblocknum,len(data)))
                     except IOError:
                         sock.sendto(
-                            errorpacket(3,
+                            errorpacket(ERR_DISKFULL,
                                 "Disk full or allocation exceeded"),rsock_addr)
                         received_file.close()
                         raise
@@ -261,16 +268,15 @@ def read(host,port,filename):
                     msg = "Wrong block received: expected %d but got %d" \
                           % (blocknum,rblocknum)
                     sock.sendto(
-                        errorpacket(4,msg,rsock_addr))
+                        errorpacket(ERR_ILLEGAL,msg,rsock_addr))
                     received_file.close()
                     raise WrongBlock(msg)
             else:
                 sock.sendto(
-                    errorpacket(4,"Illegal TFTP Operation",rsock_addr))
+                    errorpacket(ERR_ILLEGAL,"Illegal TFTP Operation",rsock_addr))
                 received_file.close()
                 raise IllegalOperationReceived("Unexpected Opcode")
-    raise TooManyRetries(
-        "Failed after %d retries" % MAX_RETRIES)
+    received_file.close()
 
 def main():
     if len(argv) != 4 and len(argv) != 5:
